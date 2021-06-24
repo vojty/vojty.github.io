@@ -1,0 +1,139 @@
+---
+title: GameBoy Emulation - From Typescript to Rust
+description:
+  Few thoughts on switching from Typescript to Rust during the GameBoy emulator
+  development
+date: '2021-06-14'
+---
+
+Some of you might know that I've been on a journey to implement the GameBoy
+emulator.
+
+I've decided to write down a few thoughts I've come into during the development.
+
+## The origins
+
+I think I started this project in the summer of 2019. I always wanted to have a
+side project where I can polish things infinitely and try new technologies.
+Actually, the original idea was to create a PS1 emulator, but I quickly realized
+that emulating PS1 is **much harder** than GB (and I didn't have any experience
+in emulating systems anyway).
+
+I didn't want to spend a lot of time learning a new programming language, so I
+decided to use TypeScript which I had been using daily.
+
+Timeline
+
+- 2019 Fall - start
+- 2019 Winter - the first successful boot with scrolling Nintendo logo
+- 2020 March - working Dr. Mario and passing some integration tests
+- 2020 May - major refactor and made the CPU cycle-accurate
+- 2020 Summer - added support for general MBCs, many games was playable by then
+- 2020 Fall - finally created scripts for automated testing, improved PPU's
+  accuracy (added FIFO for background tiles and improved timing of some STAT
+  interrupts)
+
+At the end of 2020, I started working on APU (audio processing unit). By then
+the code was becoming slightly messy because I was discovering new things on the
+fly and had to refactor very often.
+
+## Transition to Rust
+
+### Why
+
+Fast forward to the beginning of 2021, I decided to completely rewrite the
+emulator to Rust. These were the major impulses:
+
+- Rust can be compiled to WASM - I wanted to preserve the idea of Gameboy in the
+  browser
+- I was generally interested in Rust - I watched few Rust presentations, did
+  some exercises during the fall of 2020 and was ready to write something bigger
+- I needed to build advanced debugging tools and visualize the internals in the
+  real-time. I was looking for something like
+  [Dear ImGui](https://github.com/ocornut/imgui) for the browser, but I didn't
+  find anything quite usable (although there are JS bindings for Dear ImGui, the
+  library is missing an ES build & the dist version is polluted with SystemJS
+  and the maintainer wants to keep it that way apparently...). Luckily I found
+  [egui](https://github.com/emilk/egui)
+- Performance - During the development, the CPU usage in the browser went from
+  around 20-30% to 80%
+
+### Performance issues
+
+Let's do some basic calculation first:
+
+```
+GameBoy's CPU runs at 4 194 304 Hz, the FPS is 59.7275 Hz
+->
+4 194 304 / 59.7275 = 70 224 cycles per frame
+```
+
+The alternative calculation:
+
+```
+One scanline takes 456 cycles
+There are 144 visible lines + 10 lines during V-blank
+->
+456 * (144 + 10) = 70 224 cycles per frame
+```
+
+Given the fact that one instruction takes 1-4 cycles to execute, you need to
+process more than **17 000 instructions per every frame**. That's quite a lot so
+any "not so optimal" code in some critical execution path can affect your
+performance greatly.
+
+This makes your debugging quite hard as well. You usually want to see what
+happened during the code execution and print (almost) every step, but putting
+`console.log` after every instruction is not really an option, because the
+browser will immediately freeze.
+
+Although it's definitely doable to write somehow performant GB emulator only in
+Javascript, I didn't care about the performance (we are used to the fact Chrome
+eats all the RAM, right?) until it was kinda late and I didn't want to optimize
+my messy code anyway.
+
+### Architecture change
+
+I decided to split the project into multiple parts - the GB core and the
+frontends. The simplified public API of the core is just 2 functions
+`run_frame()` and `get_screen_buffer()`. The frontend can be anything - it just
+needs to execute `run_frame()` and draw the screen buffer around 60 times per
+second. With this approach, I was able to develop the emulator with SDL2 on my
+computer and convert it to a web version using
+[wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) afterward. Finally, the
+`egui` library (which can target WASM with WebGL) gave me the power to build
+cross-platform debugging tools. Suddenly I was able to write a simple and
+real-time disassembler with no performance issues (the GUI web app is very
+performant since it's WebGL).
+
+### Performance concerns
+
+I like the concept of immutability and it's also quite popular or even required
+when developing frontend with React. Usually, you just create or clone objects
+and arrays (although many times they are just shallow copies) as you need
+without any performance concerns.
+
+But writing an emulator this way is a terrible idea. One thing you want to avoid
+as much as possible is dynamic memory allocation. Almost everything in the
+GameBoy development has a fixed size so you can allocate the space upfront.
+
+Once, I hacked something very quickly and made a silly mistake. I used
+`std::collections::HashMap` when I tried to store some information for every
+rendered pixel in the line like this
+`hashMap.insert(pixel_x, (color_number, priority))`. When I checked the emulator
+in the browser after some time I noticed that the performance went somehow from
+~30% of CPU to almost 85%. Fortunately, I was able to trace this problem with
+[flamegraph](https://github.com/flamegraph-rs/flamegraph) very quickly. Those
+extra allocations more than doubled the overall performance. Using different
+data structure fixed the problem.
+
+## Final thoughts
+
+Sometimes it's better to start from scratch than trying to rewrite existing
+code. The rewrite took me around two weeks and it was a pretty straightforward
+process. Few times I got stuck when I tried to figure out "how to do X in Rust"
+but that's how you learn a new language I guess. Changing the technology helped
+me to build things I wouldn't be able to do with pure TS/JS or they would be too
+slow.
+
+The demo of my emulator can be found here https://vojty.github.io/feather-gb
